@@ -343,12 +343,26 @@ extension AnthropicProvider {
     }
 
     /// Converts a JSON schema dictionary to Anthropic's InputSchema type.
+    ///
+    /// `GenerationSchema.toJSONSchema()` produces a `$ref`-rooted schema
+    /// when the underlying `DynamicGenerationSchema` was constructed with
+    /// a non-nil root `name` — which is the standard shape consumers
+    /// generate via `Tool.toAnthropicFormat()` and the
+    /// `ConduitToolSchemaConverter` layer in Swarm. In that case the
+    /// top-level dict is `{"$defs": {"<name>": {...}}, "$ref": "#/$defs/<name>"}`
+    /// and reading `dict["properties"]` / `dict["required"]` directly
+    /// yields nothing — Anthropic ends up with an empty `input_schema`
+    /// and the model has no idea which tool parameters are required.
+    /// Resolve `$ref` through `$defs` first when present so both rooted
+    /// shapes (flat object vs. ref-with-defs) produce a correct
+    /// `input_schema`.
     private func convertToInputSchema(
         _ dict: [String: Any]
     ) -> AnthropicMessagesRequest.ToolDefinitionRequest.InputSchema {
-        let properties = (dict["properties"] as? [String: [String: Any]]) ?? [:]
-        let required = dict["required"] as? [String]
-        let additionalProperties = dict["additionalProperties"] as? Bool
+        let resolved = Self.resolveSchemaRoot(dict)
+        let properties = (resolved["properties"] as? [String: [String: Any]]) ?? [:]
+        let required = resolved["required"] as? [String]
+        let additionalProperties = resolved["additionalProperties"] as? Bool
 
         let convertedProperties = properties.mapValues { propDict -> AnthropicMessagesRequest.ToolDefinitionRequest.PropertySchema in
             convertToPropertySchema(propDict)
@@ -360,6 +374,29 @@ extension AnthropicProvider {
             required: required,
             additionalProperties: additionalProperties
         )
+    }
+
+    /// Returns the dictionary node a JSON schema's root effectively
+    /// describes. When `dict` carries a `$ref` plus a sibling `$defs`
+    /// table — the standard `GenerationSchema` encoding for any schema
+    /// built from a named `DynamicGenerationSchema` — follow the
+    /// reference into `$defs` and return the referenced object. Falls
+    /// back to `dict` itself for already-flat schemas, malformed
+    /// references, or any error along the resolution path so callers
+    /// never get worse behavior than the pre-resolution code had.
+    ///
+    /// `internal static` (rather than instance-private) so unit tests
+    /// can verify the resolution logic directly without booting an
+    /// `AnthropicProvider` actor or a URL-mocking harness.
+    static func resolveSchemaRoot(_ dict: [String: Any]) -> [String: Any] {
+        guard let ref = dict["$ref"] as? String,
+              ref.hasPrefix("#/$defs/"),
+              let defs = dict["$defs"] as? [String: [String: Any]] else {
+            return dict
+        }
+        let name = String(ref.dropFirst("#/$defs/".count))
+        guard let resolved = defs[name] else { return dict }
+        return resolved
     }
 
     /// Converts a property dictionary to PropertySchema.
