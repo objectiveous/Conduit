@@ -218,13 +218,29 @@ extension AnthropicProvider {
             AnthropicMessagesRequest.Metadata(userId: $0)
         }
 
+        // Anthropic's Messages API rejects requests that specify both
+        // `temperature` and `top_p` for current Claude models. Their
+        // documentation has long recommended "use only one"; the API
+        // now enforces it. Conduit's GenerateConfig.default carries
+        // both (temperature=0.7, topP=0.9), so a naive serialization
+        // sends both and gets rejected. Resolve the conflict in favor
+        // of temperature: when temperature is being sent, drop top_p
+        // from the wire format. Callers who want top_p-only sampling
+        // can signal that by setting temperature to a negative value
+        // (the existing `temperature >= 0` gate then drops temperature
+        // and lets top_p through).
+        let outboundTemperature = config.temperature >= 0 ? Double(config.temperature) : nil
+        let outboundTopP: Double? = {
+            guard outboundTemperature == nil else { return nil }
+            return (config.topP > 0 && config.topP <= 1) ? Double(config.topP) : nil
+        }()
         return AnthropicMessagesRequest(
             model: model.rawValue,
             messages: apiMessages,
             maxTokens: config.maxTokens ?? 1024,
             system: effectiveSystemPrompt,
-            temperature: config.temperature >= 0 ? Double(config.temperature) : nil,
-            topP: (config.topP > 0 && config.topP <= 1) ? Double(config.topP) : nil,
+            temperature: outboundTemperature,
+            topP: outboundTopP,
             topK: config.topK,
             stream: stream ? true : nil,
             thinking: thinkingRequest,
