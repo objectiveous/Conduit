@@ -14,14 +14,14 @@ let includeMLXImageDependencies =
 
 var packageDependencies: [Package.Dependency] = [
     // MARK: Cross-Platform Dependencies
-    .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
+    .package(path: "../SwiftSupport/swift-collections"),
     .package(url: "https://github.com/apple/swift-numerics", from: "1.0.0"),
     .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0"..<"603.0.0"),
-    .package(url: "https://github.com/apple/swift-log.git", from: "1.8.0"),
+    .package(path: "../SwiftSupport/swift-log"),
 
     // MARK: Hugging Face Hub / Core ML
     .package(url: "https://github.com/huggingface/swift-huggingface", from: "0.9.0"),
-    .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.6"),
+    .package(path: "../SwiftSupport/swift-transformers"),
 
     // MARK: llama.cpp (Optional)
     .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "2.7484.0")),
@@ -50,7 +50,7 @@ if includeMLXImageDependencies {
 
 var conduitAdvancedDependencies: [Target.Dependency] = [
     "ConduitMacros",
-    .product(name: "OrderedCollections", package: "swift-collections"),
+    .product(name: "Collections", package: "swift-collections"),
     .product(name: "Numerics", package: "swift-numerics"),
     .product(name: "Logging", package: "swift-log"),
     .product(name: "Hub", package: "swift-transformers"),

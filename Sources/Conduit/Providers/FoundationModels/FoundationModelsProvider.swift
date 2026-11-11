@@ -361,11 +361,11 @@ public actor FoundationModelsProvider: AIProvider, TextGenerator {
         }
 
         if let topK = config.topK, topK > 0 {
-            options.sampling = .random(top: topK, seed: config.seed)
+            options.samplingMode = .random(top: topK, seed: config.seed)
         } else if config.topP > 0, config.topP <= 1 {
-            options.sampling = .random(probabilityThreshold: Double(config.topP), seed: config.seed)
+            options.samplingMode = .random(probabilityThreshold: Double(config.topP), seed: config.seed)
         } else if config.temperature == 0 {
-            options.sampling = .greedy
+            options.samplingMode = .greedy
         }
 
         return options

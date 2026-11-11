@@ -31,6 +31,16 @@ private struct AnthropicNoopTool: Tool {
 @Suite("Anthropic Configuration Tests")
 struct AnthropicConfigurationTests {
 
+    @Test("Public custom endpoint initializer retains validated base URL")
+    func publicCustomEndpoint() throws {
+        let url = try #require(URL(string: "https://proxy.example/prefix"))
+        let provider = try AnthropicProvider(apiKey: "test-only-key", baseURL: url)
+        #expect(provider.configuration.baseURL == url)
+        #expect(throws: (any Error).self) {
+            _ = try AnthropicProvider(apiKey: "test-only-key", baseURL: URL(string: "http://insecure.example")!)
+        }
+    }
+
     @Test("Default configuration uses Anthropic endpoint")
     func defaultConfiguration() throws {
         let config = try AnthropicConfiguration()

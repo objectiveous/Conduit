@@ -169,6 +169,16 @@ public actor AnthropicProvider: AIProvider, TextGenerator {
         self.init(configuration: .standard(apiKey: apiKey))
     }
 
+    /// Creates a provider using a custom API base URL, preserving the standard
+    /// Anthropic request encoding, authentication, and transport policies.
+    /// The base URL excludes the `/v1/messages` request suffix.
+    /// - Throws: `AIError.invalidInput` for insecure non-local endpoints.
+    public init(apiKey: String, baseURL: URL) throws {
+        self.init(configuration: try AnthropicConfiguration(
+            authentication: .apiKey(apiKey), baseURL: baseURL))
+    }
+
+
     /// Creates a provider with a full configuration.
     ///
     /// This initializer provides complete control over provider behavior,
