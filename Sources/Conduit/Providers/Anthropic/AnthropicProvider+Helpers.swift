@@ -96,8 +96,11 @@ extension AnthropicProvider {
         let apiMessages = messages.compactMap { msg -> AnthropicMessagesRequest.MessageContent? in
             switch msg.role {
             case .assistant:
-                if let toolCalls = msg.metadata?.toolCalls, !toolCalls.isEmpty {
-                    var apiParts: [AnthropicMessagesRequest.MessageContent.ContentPart] = []
+                let toolCalls = msg.metadata?.toolCalls ?? []
+                let thinkingParts = Self.replayedThinkingParts(msg.metadata?.reasoningDetails)
+                if !toolCalls.isEmpty || !thinkingParts.isEmpty {
+                    // Signed thinking blocks go first, unchanged, then text, then tool_use.
+                    var apiParts: [AnthropicMessagesRequest.MessageContent.ContentPart] = thinkingParts
 
                     let text = msg.content.textValue
                     if !text.isEmpty {
@@ -204,13 +207,27 @@ extension AnthropicProvider {
             }
         }
 
-        // Add extended thinking if configured
+        // Add extended thinking if configured.
+        // An explicit provider-level thinkingConfig keeps its original behaviour
+        // (fixed budget). Otherwise GenerateConfig.reasoning asks for thinking,
+        // shaped for the model (adaptive + display on current models, a budget
+        // on older ones).
+        let maxTokens = config.maxTokens ?? 1024
         var thinkingRequest: AnthropicMessagesRequest.ThinkingRequest? = nil
+        var thinkingFromReasoning = false
         if let thinkingConfig = configuration.thinkingConfig, thinkingConfig.enabled {
             thinkingRequest = AnthropicMessagesRequest.ThinkingRequest(
                 type: "enabled",
                 budget_tokens: thinkingConfig.budgetTokens
             )
+        } else if configuration.thinkingConfig == nil,
+                  let derived = Self.thinkingRequest(
+                    for: config.reasoning,
+                    modelID: model.rawValue,
+                    maxTokens: maxTokens
+                  ) {
+            thinkingRequest = derived
+            thinkingFromReasoning = true
         }
 
         // Build metadata if userId is provided
@@ -244,7 +261,13 @@ extension AnthropicProvider {
         let topPNonDefault = config.topP != defaults.topP
         let temperatureNonDefault = config.temperature != defaults.temperature
         let preferTopP = topPNonDefault && !temperatureNonDefault
-        if preferTopP {
+        if thinkingFromReasoning {
+            // Thinking requests reject sampling changes: current models reject
+            // temperature/top_p/top_k outright, and older thinking models accept
+            // only temperature 1. Leave them all to the API defaults.
+            outboundTemperature = nil
+            outboundTopP = nil
+        } else if preferTopP {
             outboundTemperature = nil
             outboundTopP = (config.topP > 0 && config.topP <= 1) ? Double(config.topP) : nil
         } else {
@@ -255,11 +278,11 @@ extension AnthropicProvider {
         return AnthropicMessagesRequest(
             model: model.rawValue,
             messages: apiMessages,
-            maxTokens: config.maxTokens ?? 1024,
+            maxTokens: maxTokens,
             system: effectiveSystemPrompt,
             temperature: outboundTemperature,
             topP: outboundTopP,
-            topK: config.topK,
+            topK: thinkingFromReasoning ? nil : config.topK,
             stream: stream ? true : nil,
             thinking: thinkingRequest,
             stopSequences: config.stopSequences.isEmpty ? nil : config.stopSequences,
@@ -540,7 +563,6 @@ extension AnthropicProvider {
         )
     }
 }
-
 
 // MARK: - HTTP Execution
 
@@ -915,13 +937,34 @@ extension AnthropicProvider {
         rateLimitInfo: RateLimitInfo? = nil
     ) throws -> GenerationResult {
         // Extract text content and tool calls from content blocks
-        // Note: Thinking blocks (type="thinking") contain internal reasoning
-        // and are filtered out, as they are not part of the user-facing response
+        // Note: Thinking blocks (type="thinking"/"redacted_thinking") are kept out
+        // of the text and returned as reasoningDetails (with their signatures).
         var textContent = ""
         var toolCalls: [Transcript.ToolCall] = []
+        var reasoningDetails: [ReasoningDetail] = []
 
-        for block in response.content {
+        for (blockIndex, block) in response.content.enumerated() {
             switch block.type {
+            case "thinking":
+                // Kept separate from the text; the signature lets callers replay
+                // the block unchanged on the next request.
+                reasoningDetails.append(ReasoningDetail(
+                    id: "\(blockIndex)",
+                    type: Self.anthropicThinkingDetailType,
+                    format: Self.anthropicReasoningFormat,
+                    index: blockIndex,
+                    content: block.thinking ?? "",
+                    signature: block.signature
+                ))
+            case "redacted_thinking":
+                reasoningDetails.append(ReasoningDetail(
+                    id: "\(blockIndex)",
+                    type: Self.anthropicRedactedThinkingDetailType,
+                    format: Self.anthropicReasoningFormat,
+                    index: blockIndex,
+                    content: nil,
+                    signature: block.data
+                ))
             case "text":
                 if let text = block.text {
                     textContent += text
@@ -940,7 +983,7 @@ extension AnthropicProvider {
                     toolCalls.append(toolCall)
                 }
             default:
-                // Skip thinking blocks and other types
+                // Skip other block types
                 break
             }
         }
@@ -956,8 +999,6 @@ extension AnthropicProvider {
             ))
         }
 
-        // Future enhancement: thinking blocks could be exposed via GenerationResult metadata
-        // Example: response.content.filter { $0.type == "thinking" }.compactMap { $0.text }
         let text = responseText
 
         // Calculate performance metrics
@@ -976,7 +1017,8 @@ extension AnthropicProvider {
                 completionTokens: response.usage.outputTokens
             ),
             rateLimitInfo: rateLimitInfo,
-            toolCalls: toolCalls
+            toolCalls: toolCalls,
+            reasoningDetails: reasoningDetails
         )
     }
 

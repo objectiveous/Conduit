@@ -356,6 +356,9 @@ extension AnthropicProvider {
         var activeToolCalls: [Int: (id: String, name: String, jsonBuffer: String)] = [:]
         var completedToolCalls: [Transcript.ToolCall] = []
 
+        // Thinking block accumulation state, by content block index.
+        var activeThinkingBlocks: [Int: AnthropicThinkingBlockState] = [:]
+
         var sseParser = ServerSentEventParser()
 
         sse: for try await line in bytes.lines {
@@ -378,7 +381,8 @@ extension AnthropicProvider {
                             startTime: startTime,
                             totalTokens: &totalTokens,
                             activeToolCalls: &activeToolCalls,
-                            completedToolCalls: &completedToolCalls
+                            completedToolCalls: &completedToolCalls,
+                            activeThinkingBlocks: &activeThinkingBlocks
                         ) {
                             continuation.yield(chunk)
                         }
@@ -545,8 +549,57 @@ extension AnthropicProvider {
         activeToolCalls: inout [Int: (id: String, name: String, jsonBuffer: String)],
         completedToolCalls: inout [Transcript.ToolCall]
     ) throws -> GenerationChunk? {
+        // Thinking state does not survive across calls through this overload;
+        // streaming uses the overload below, which carries it.
+        var activeThinkingBlocks: [Int: AnthropicThinkingBlockState] = [:]
+        return try processStreamEvent(
+            event,
+            startTime: startTime,
+            totalTokens: &totalTokens,
+            activeToolCalls: &activeToolCalls,
+            completedToolCalls: &completedToolCalls,
+            activeThinkingBlocks: &activeThinkingBlocks
+        )
+    }
+
+    /// Processes a stream event, including Anthropic thinking blocks.
+    ///
+    /// ## Thinking
+    ///
+    /// - `content_block_start` with a `thinking` block starts accumulation;
+    ///   a `redacted_thinking` block records its opaque `data`.
+    /// - `thinking_delta` with non-empty text yields a chunk with empty `text`
+    ///   and one partial `ReasoningDetail` (`signature == nil`, `content` = the
+    ///   new fragment only).
+    /// - `signature_delta` records the signature (no chunk).
+    /// - `content_block_stop` for a thinking block yields a chunk with one
+    ///   finished `ReasoningDetail`: `content` = the block's full text (do not
+    ///   append it to the partial text already received) and `signature` set.
+    ///   This detail is what must be replayed on the next request.
+    internal func processStreamEvent(
+        _ event: AnthropicStreamEvent,
+        startTime: Date,
+        totalTokens: inout Int,
+        activeToolCalls: inout [Int: (id: String, name: String, jsonBuffer: String)],
+        completedToolCalls: inout [Transcript.ToolCall],
+        activeThinkingBlocks: inout [Int: AnthropicThinkingBlockState]
+    ) throws -> GenerationChunk? {
         switch event {
         case .contentBlockStart(let start):
+            if start.contentBlock.type == "thinking" {
+                activeThinkingBlocks[start.index] = AnthropicThinkingBlockState(
+                    text: start.contentBlock.thinking ?? "",
+                    signature: start.contentBlock.signature.flatMap { $0.isEmpty ? nil : $0 }
+                )
+                return nil
+            }
+            if start.contentBlock.type == "redacted_thinking" {
+                activeThinkingBlocks[start.index] = AnthropicThinkingBlockState(
+                    isRedacted: true,
+                    signature: start.contentBlock.data
+                )
+                return nil
+            }
             // Initialize tool call state for tool_use blocks
             if start.contentBlock.type == "tool_use",
                let id = start.contentBlock.id,
@@ -585,6 +638,35 @@ extension AnthropicProvider {
                 )
             }
 
+            // Handle thinking text deltas
+            if delta.delta.type == "thinking_delta" {
+                let fragment = delta.delta.thinking ?? ""
+                var block = activeThinkingBlocks[delta.index] ?? AnthropicThinkingBlockState()
+                block.text += fragment
+                activeThinkingBlocks[delta.index] = block
+                guard !fragment.isEmpty else { return nil }
+                return GenerationChunk(
+                    text: "",
+                    tokenCount: 0,
+                    timestamp: Date(),
+                    reasoningDetails: [ReasoningDetail(
+                        id: "\(delta.index)",
+                        type: Self.anthropicThinkingDetailType,
+                        format: Self.anthropicReasoningFormat,
+                        index: delta.index,
+                        content: fragment
+                    )]
+                )
+            }
+
+            // Handle thinking signature (sent once, just before content_block_stop)
+            if delta.delta.type == "signature_delta" {
+                var block = activeThinkingBlocks[delta.index] ?? AnthropicThinkingBlockState()
+                block.signature = (block.signature ?? "") + (delta.delta.signature ?? "")
+                activeThinkingBlocks[delta.index] = block
+                return nil
+            }
+
             // Handle tool input JSON deltas
             if delta.delta.type == "input_json_delta", let partialJson = delta.delta.partialJson {
                 if var toolData = activeToolCalls[delta.index] {
@@ -614,6 +696,29 @@ extension AnthropicProvider {
             return nil
 
         case .contentBlockStop(let stop):
+            // Finalize a thinking block: yield the whole, signed block.
+            if let block = activeThinkingBlocks.removeValue(forKey: stop.index) {
+                guard let signature = block.signature, !signature.isEmpty else {
+                    logger.warning("Thinking block \(stop.index) ended without a signature; it cannot be replayed")
+                    return nil
+                }
+                return GenerationChunk(
+                    text: "",
+                    tokenCount: 0,
+                    timestamp: Date(),
+                    reasoningDetails: [ReasoningDetail(
+                        id: "\(stop.index)",
+                        type: block.isRedacted
+                            ? Self.anthropicRedactedThinkingDetailType
+                            : Self.anthropicThinkingDetailType,
+                        format: Self.anthropicReasoningFormat,
+                        index: stop.index,
+                        content: block.isRedacted ? nil : block.text,
+                        signature: signature
+                    )]
+                )
+            }
+
             // Finalize tool call if we have one at this index
             if let toolData = activeToolCalls.removeValue(forKey: stop.index) {
                 // Only create tool call if we have accumulated JSON

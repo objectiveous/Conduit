@@ -42,6 +42,14 @@ public struct MessageMetadata: Sendable, Hashable, Codable {
     /// information to be included in the assistant's message content.
     public var toolCalls: [Transcript.ToolCall]?
 
+    /// Completed reasoning blocks produced with an assistant message.
+    ///
+    /// Anthropic requires signed `thinking` blocks to be sent back unchanged,
+    /// before the turn's text and `tool_use` blocks, on later requests of the
+    /// same conversation (especially tool-use rounds). Only details carrying a
+    /// `signature` are replayed.
+    public var reasoningDetails: [ReasoningDetail]?
+
     /// Creates message metadata with optional fields.
     ///
     /// - Parameters:
@@ -50,13 +58,16 @@ public struct MessageMetadata: Sendable, Hashable, Codable {
     ///   - model: The model identifier that generated this message.
     ///   - tokensPerSecond: Generation throughput.
     ///   - custom: Custom key-value pairs for application-specific data.
+    ///   - toolCalls: Tool calls made by an assistant message.
+    ///   - reasoningDetails: Signed reasoning blocks of an assistant message.
     public init(
         tokenCount: Int? = nil,
         generationTime: TimeInterval? = nil,
         model: String? = nil,
         tokensPerSecond: Double? = nil,
         custom: [String: String]? = nil,
-        toolCalls: [Transcript.ToolCall]? = nil
+        toolCalls: [Transcript.ToolCall]? = nil,
+        reasoningDetails: [ReasoningDetail]? = nil
     ) {
         self.tokenCount = tokenCount
         self.generationTime = generationTime
@@ -64,6 +75,7 @@ public struct MessageMetadata: Sendable, Hashable, Codable {
         self.tokensPerSecond = tokensPerSecond
         self.custom = custom
         self.toolCalls = toolCalls
+        self.reasoningDetails = reasoningDetails
     }
 }
 

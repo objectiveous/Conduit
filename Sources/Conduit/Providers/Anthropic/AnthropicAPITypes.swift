@@ -282,19 +282,34 @@ internal struct AnthropicMessagesRequest: Codable, Sendable {
     ///   }
     /// }
     /// ```
-    struct ThinkingRequest: Codable, Sendable {
+    struct ThinkingRequest: Codable, Sendable, Equatable {
 
-        /// Type of thinking (always "enabled" when present).
+        /// Type of thinking.
         ///
-        /// The API currently only supports the "enabled" type.
-        /// Future versions may support additional thinking modes.
+        /// - `"enabled"`: fixed budget (`budget_tokens` required). Older
+        ///   models such as Claude Haiku 4.5 and Claude Sonnet/Opus 4.5.
+        /// - `"adaptive"`: the model decides how much to think. Required by
+        ///   current models (Fable 5, Opus 4.8, Sonnet 5, ...), which reject
+        ///   `"enabled"` with HTTP 400.
         let type: String
 
-        /// Token budget for thinking.
+        /// Token budget for thinking (only for `type == "enabled"`).
         ///
         /// Controls how many tokens the model can use for internal
-        /// reasoning before generating the response.
-        let budget_tokens: Int
+        /// reasoning before generating the response. Omitted for
+        /// adaptive thinking.
+        let budget_tokens: Int?
+
+        /// How thinking text is returned: `"summarized"` (readable summary)
+        /// or `"omitted"` (empty `thinking` text, signature only). `nil`
+        /// leaves the model's default, which is `"omitted"` on current models.
+        let display: String?
+
+        init(type: String, budget_tokens: Int? = nil, display: String? = nil) {
+            self.type = type
+            self.budget_tokens = budget_tokens
+            self.display = display
+        }
     }
 
     // MARK: - Metadata
@@ -445,6 +460,18 @@ internal struct AnthropicMessagesRequest: Codable, Sendable {
             /// Whether the tool result represents an error (for tool_result parts).
             let isError: Bool?
 
+            /// The thinking text (for thinking parts replayed in assistant turns).
+            ///
+            /// Must be sent back exactly as received, including an empty string
+            /// when the model's display mode omitted the text.
+            let thinking: String?
+
+            /// The opaque signature of a thinking part. Sent back unchanged.
+            let signature: String?
+
+            /// The opaque payload of a redacted_thinking part. Sent back unchanged.
+            let data: String?
+
             // MARK: - Coding Keys
 
             enum CodingKeys: String, CodingKey {
@@ -457,6 +484,9 @@ internal struct AnthropicMessagesRequest: Codable, Sendable {
                 case toolUseId = "tool_use_id"
                 case content
                 case isError = "is_error"
+                case thinking
+                case signature
+                case data
             }
 
             init(
@@ -468,7 +498,10 @@ internal struct AnthropicMessagesRequest: Codable, Sendable {
                 input: GeneratedContent? = nil,
                 toolUseId: String? = nil,
                 content: String? = nil,
-                isError: Bool? = nil
+                isError: Bool? = nil,
+                thinking: String? = nil,
+                signature: String? = nil,
+                data: String? = nil
             ) {
                 self.type = type
                 self.text = text
@@ -479,6 +512,9 @@ internal struct AnthropicMessagesRequest: Codable, Sendable {
                 self.toolUseId = toolUseId
                 self.content = content
                 self.isError = isError
+                self.thinking = thinking
+                self.signature = signature
+                self.data = data
             }
 
             /// Image source with base64 data.
@@ -654,6 +690,17 @@ internal struct AnthropicMessagesResponse: Codable, Sendable {
         ///
         /// Example: `{"location": "San Francisco, CA", "unit": "celsius"}`
         let input: [String: AnyCodable]?
+
+        /// The thinking text (if type is "thinking").
+        ///
+        /// Empty when the request's thinking display is `"omitted"`.
+        let thinking: String?
+
+        /// The opaque signature (if type is "thinking"). Must be replayed unchanged.
+        let signature: String?
+
+        /// The opaque payload (if type is "redacted_thinking"). Must be replayed unchanged.
+        let data: String?
     }
 
     // MARK: - Usage
@@ -891,6 +938,17 @@ internal enum AnthropicStreamEvent: Sendable {
             ///
             /// Example: `"get_weather"`
             let name: String?
+
+            /// Initial thinking text (type == "thinking"; typically empty).
+            let thinking: String?
+
+            /// Initial signature (type == "thinking"; typically empty,
+            /// the real value arrives as a `signature_delta`).
+            let signature: String?
+
+            /// Opaque payload (type == "redacted_thinking", which arrives
+            /// whole with no deltas).
+            let data: String?
         }
 
         // MARK: - Coding Keys
@@ -938,12 +996,36 @@ internal enum AnthropicStreamEvent: Sendable {
             /// the content block is complete.
             let partialJson: String?
 
+            /// Thinking text fragment (when type == "thinking_delta").
+            let thinking: String?
+
+            /// Thinking block signature (when type == "signature_delta").
+            ///
+            /// Sent once, just before the thinking block's `content_block_stop`.
+            let signature: String?
+
+            init(
+                type: String,
+                text: String? = nil,
+                partialJson: String? = nil,
+                thinking: String? = nil,
+                signature: String? = nil
+            ) {
+                self.type = type
+                self.text = text
+                self.partialJson = partialJson
+                self.thinking = thinking
+                self.signature = signature
+            }
+
             // MARK: - Coding Keys
 
             enum CodingKeys: String, CodingKey {
                 case type
                 case text
                 case partialJson = "partial_json"
+                case thinking
+                case signature
             }
         }
     }

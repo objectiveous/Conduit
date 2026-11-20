@@ -1689,18 +1689,29 @@ public struct ReasoningDetail: Sendable, Hashable, Codable {
     /// May be `nil` for encrypted blocks.
     public let content: String?
 
+    /// Opaque provider signature that must be sent back unchanged when the
+    /// reasoning block is replayed (Anthropic `thinking` blocks carry one).
+    ///
+    /// For Anthropic `redacted_thinking` blocks (`type == "reasoning.encrypted"`)
+    /// this holds the block's opaque `data` payload instead.
+    ///
+    /// `nil` for partial (streaming) details and for providers without signatures.
+    public let signature: String?
+
     /// Creates a reasoning detail.
     public init(
         id: String,
         type: String,
         format: String,
         index: Int,
-        content: String?
+        content: String?,
+        signature: String? = nil
     ) {
         self.id = id
         self.type = type
         self.format = format
         self.index = index
         self.content = content
+        self.signature = signature
     }
 }
