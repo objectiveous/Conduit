@@ -89,6 +89,12 @@ extension OpenAIProvider {
             "stream": stream
         ]
 
+        // Without this, OpenAI-compatible servers send no token usage on a stream.
+        // The counts arrive on a final chunk with empty `choices`.
+        if stream {
+            body["stream_options"] = ["include_usage": true]
+        }
+
         // Convert messages with full content support (text, images, audio)
         body["messages"] = messages.map { message -> [String: Any] in
             var messageDict: [String: Any] = ["role": message.role.rawValue]

@@ -184,8 +184,22 @@ extension OpenAIProvider {
             throw AIError.serverError(statusCode: httpResponse.statusCode, message: message)
         }
 
+        try await processChatCompletionsStream(lines: bytes.lines, continuation: continuation)
+    }
+
+    /// Parses a chat-completions SSE stream, line by line, into generation chunks.
+    ///
+    /// Token usage is read from the top-level `usage` object of any chunk. With
+    /// `stream_options.include_usage`, OpenAI-compatible servers send it on a last
+    /// chunk whose `choices` array is empty; that chunk is yielded as a completion
+    /// chunk carrying only `usage`.
+    internal nonisolated func processChatCompletionsStream<Lines: AsyncSequence>(
+        lines: Lines,
+        continuation: AsyncThrowingStream<GenerationChunk, Error>.Continuation
+    ) async throws where Lines.Element == String {
         // Parse SSE stream
         var chunkIndex = 0
+        var lastFinishReason: FinishReason?
         var sseParser = ServerSentEventParser()
 
         // Tool call accumulation by index
@@ -231,17 +245,39 @@ extension OpenAIProvider {
             }
 
             guard let jsonData = jsonStr.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
+            else {
+                return false
+            }
+
+            // OpenAI sends `"usage": null` on every chunk but the last when
+            // include_usage is on; only an object counts.
+            let usage = parseResponsesUsage(json["usage"] as? [String: Any])
+
+            guard let choices = json["choices"] as? [[String: Any]],
                   let firstChoice = choices.first,
                   let delta = firstChoice["delta"] as? [String: Any]
             else {
+                // Usage-only chunk (`"choices": []`): the stream's final token counts.
+                if let usage {
+                    continuation.yield(GenerationChunk(
+                        text: "",
+                        tokenCount: 0,
+                        isComplete: true,
+                        finishReason: lastFinishReason,
+                        usage: usage
+                    ))
+                    chunkIndex += 1
+                }
                 return false
             }
 
             let content = delta["content"] as? String
             let finishReasonStr = firstChoice["finish_reason"] as? String
             let finishReason = finishReasonStr.flatMap { FinishReason(rawValue: $0) }
+            if let finishReason {
+                lastFinishReason = finishReason
+            }
 
             var hasReasoningUpdate = false
             var reasoningDetailsForChunk: [ReasoningDetail]? = nil
@@ -408,6 +444,7 @@ extension OpenAIProvider {
                     tokenCount: content?.isEmpty == false ? 1 : 0,
                     isComplete: true,
                     finishReason: finishReason,
+                    usage: usage,
                     completedToolCalls: completedToolCalls.isEmpty ? nil : completedToolCalls,
                     reasoningDetails: completedReasoningDetails.isEmpty ? nil : completedReasoningDetails
                 )
@@ -427,6 +464,7 @@ extension OpenAIProvider {
                     text: content,
                     isComplete: finishReason != nil,
                     finishReason: finishReason,
+                    usage: usage,
                     partialToolCall: partialToolCall,
                     reasoningDetails: finalReasoningDetails
                 )
@@ -438,6 +476,7 @@ extension OpenAIProvider {
                     text: "",
                     tokenCount: 0,
                     isComplete: false,
+                    usage: usage,
                     partialToolCall: partialToolCall,
                     reasoningDetails: reasoningDetailsForChunk
                 )
@@ -448,6 +487,7 @@ extension OpenAIProvider {
                     text: "",
                     tokenCount: 0,
                     isComplete: false,
+                    usage: usage,
                     reasoningDetails: reasoningDetailsForChunk
                 )
                 continuation.yield(chunk)
@@ -460,15 +500,28 @@ extension OpenAIProvider {
                     tokenCount: 0,
                     isComplete: true,
                     finishReason: finishReason,
+                    usage: usage,
                     reasoningDetails: completedReasoningDetails.isEmpty ? nil : completedReasoningDetails
                 )
                 continuation.yield(chunk)
+                chunkIndex += 1
+            } else if let usage {
+                // Usage on a chunk that carries nothing else (some servers send an
+                // empty delta alongside the counts).
+                continuation.yield(GenerationChunk(
+                    text: "",
+                    tokenCount: 0,
+                    isComplete: true,
+                    finishReason: lastFinishReason,
+                    usage: usage
+                ))
+                chunkIndex += 1
             }
 
             return false
         }
 
-        for try await line in bytes.lines {
+        for try await line in lines {
             try Task.checkCancellation()
 
             for event in sseParser.ingestLine(line) {
